@@ -1,0 +1,20 @@
+{
+  "name": "kraken-wasm",
+  "type": "module",
+  "collaborators": [
+    "Hitakshi Arora"
+  ],
+  "description": "WASM bindings for Kraken orderbook engine",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "kraken_wasm_bg.wasm",
+    "kraken_wasm.js",
+    "kraken_wasm.d.ts"
+  ],
+  "main": "kraken_wasm.js",
+  "types": "kraken_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

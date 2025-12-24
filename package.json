@@ -11,7 +11,7 @@
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "kraken-wasm": "file:../Havklo_sdk/crates/kraken-wasm/pkg"
+    "kraken-wasm": "file:./wasm"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

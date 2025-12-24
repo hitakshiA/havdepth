@@ -1,55 +1,134 @@
-import { useState, useEffect, useRef } from 'react'
-import initWasm, { WasmOrderbook } from 'kraken-wasm'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import initWasm, { WasmOrderbook } from '../wasm/kraken_wasm.js'
+
+const SYMBOLS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'XRP/USD', 'ADA/USD']
+const DEPTH = 100  // Kraken supports: 10, 25, 100, 500, 1000
+
+// Precision settings for checksum calculation
+const SYMBOL_PRECISION = {
+  'BTC/USD': [1, 8],
+  'ETH/USD': [2, 8],
+  'SOL/USD': [2, 8],
+  'XRP/USD': [5, 8],
+  'ADA/USD': [6, 8],
+}
 
 export default function App() {
   const [status, setStatus] = useState('Initializing...')
+  const [sdkReady, setSdkReady] = useState(false)
+  const [selectedSymbol, setSelectedSymbol] = useState('BTC/USD')
   const [bids, setBids] = useState([])
   const [asks, setAsks] = useState([])
   const [midPrice, setMidPrice] = useState(null)
   const [spread, setSpread] = useState(null)
-  const bookRef = useRef(null)
+
+  const booksRef = useRef({})
   const wsRef = useRef(null)
   const canvasRef = useRef(null)
+  const messageQueueRef = useRef([])
+  const processingRef = useRef(false)
+  const selectedSymbolRef = useRef(selectedSymbol)
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    selectedSymbolRef.current = selectedSymbol
+  }, [selectedSymbol])
+
+  // Process messages sequentially to avoid WASM borrow conflicts
+  const processNextMessage = useCallback(() => {
+    if (processingRef.current) return
+    if (messageQueueRef.current.length === 0) return
+
+    processingRef.current = true
+    const { symbol, data } = messageQueueRef.current.shift()
+
+    try {
+      const book = booksRef.current[symbol]
+      if (!book) {
+        processingRef.current = false
+        if (messageQueueRef.current.length > 0) setTimeout(processNextMessage, 0)
+        return
+      }
+
+      const result = book.apply_and_get(data, DEPTH)
+
+      // Only update UI if this is the currently selected symbol
+      if (result && (result.msg_type === 'update' || result.msg_type === 'snapshot')) {
+        if (symbol === selectedSymbolRef.current) {
+          const topBids = result.bids || []
+          const topAsks = result.asks || []
+
+          setBids(topBids)
+          setAsks(topAsks)
+          setMidPrice(result.mid_price || null)
+          setSpread(result.spread || null)
+        }
+      }
+    } catch (e) {
+      // Silently ignore errors
+    } finally {
+      processingRef.current = false
+      if (messageQueueRef.current.length > 0) {
+        setTimeout(processNextMessage, 0)
+      }
+    }
+  }, [])
+
+  const queueMessage = useCallback((symbol, data) => {
+    messageQueueRef.current.push({ symbol, data })
+    if (messageQueueRef.current.length > 200) {
+      messageQueueRef.current = messageQueueRef.current.slice(-100)
+    }
+    processNextMessage()
+  }, [processNextMessage])
 
   useEffect(() => {
     let mounted = true
 
     async function init() {
+      console.log('[HAVDEPTH] Initializing Havklo SDK...')
       await initWasm()
       if (!mounted) return
 
-      bookRef.current = new WasmOrderbook()
-      setStatus('Connecting...')
+      console.log('[HAVDEPTH] SDK ready')
+      setSdkReady(true)
 
+      // Create orderbooks for all symbols with correct precision
+      SYMBOLS.forEach(sym => {
+        const book = WasmOrderbook.with_depth(sym, DEPTH)
+        const [pricePrecision, qtyPrecision] = SYMBOL_PRECISION[sym] || [2, 8]
+        book.set_precision(pricePrecision, qtyPrecision)
+        booksRef.current[sym] = book
+      })
+
+      setStatus('Connecting...')
       const ws = new WebSocket('wss://ws.kraken.com/v2')
       wsRef.current = ws
 
       ws.onopen = () => {
+        if (!mounted) return
+        console.log('[HAVDEPTH] WebSocket connected')
         setStatus('Connected')
         ws.send(JSON.stringify({
           method: 'subscribe',
-          params: { channel: 'book', symbol: ['BTC/USD'], depth: 100 }
+          params: { channel: 'book', symbol: SYMBOLS, depth: DEPTH }
         }))
       }
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.channel === 'book' && data.data) {
-          bookRef.current.apply_message(event.data)
-
-          const topBids = bookRef.current.get_top_bids(50)
-          const topAsks = bookRef.current.get_top_asks(50)
-          const mid = bookRef.current.get_mid_price()
-          const spr = bookRef.current.get_spread()
-
-          setBids(topBids)
-          setAsks(topAsks)
-          setMidPrice(mid)
-          setSpread(spr)
-        }
+        if (!mounted) return
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.channel === 'book' && msg.data?.[0]?.symbol) {
+            queueMessage(msg.data[0].symbol, event.data)
+          }
+        } catch (e) {}
       }
 
-      ws.onclose = () => setStatus('Disconnected')
+      ws.onclose = () => {
+        if (!mounted) return
+        setStatus('Disconnected')
+      }
       ws.onerror = () => setStatus('Error')
     }
 
@@ -57,8 +136,24 @@ export default function App() {
     return () => {
       mounted = false
       wsRef.current?.close()
+      Object.values(booksRef.current).forEach(book => {
+        try { book.free() } catch (e) {}
+      })
     }
-  }, [])
+  }, [queueMessage])
+
+  // Handle symbol change
+  const handleSymbolChange = (newSymbol) => {
+    setSelectedSymbol(newSymbol)
+    setBids([])
+    setAsks([])
+    setMidPrice(null)
+    setSpread(null)
+  }
+
+  // Helper to get price/qty from SDK objects
+  const getPrice = (item) => item.price || item[0] || 0
+  const getQty = (item) => item.qty || item[1] || 0
 
   // Draw depth chart
   useEffect(() => {
@@ -80,15 +175,17 @@ export default function App() {
     let cumVol = 0
 
     for (let i = 0; i < bids.length; i++) {
-      cumVol += bids[i][1]
-      cumBids.push({ price: bids[i][0], volume: cumVol })
+      cumVol += getQty(bids[i])
+      cumBids.push({ price: getPrice(bids[i]), volume: cumVol })
     }
 
     cumVol = 0
     for (let i = 0; i < asks.length; i++) {
-      cumVol += asks[i][1]
-      cumAsks.push({ price: asks[i][0], volume: cumVol })
+      cumVol += getQty(asks[i])
+      cumAsks.push({ price: getPrice(asks[i]), volume: cumVol })
     }
+
+    if (cumBids.length === 0 || cumAsks.length === 0) return
 
     // Find ranges
     const maxVolume = Math.max(
@@ -98,6 +195,8 @@ export default function App() {
     const minPrice = cumBids[cumBids.length - 1]?.price || 0
     const maxPrice = cumAsks[cumAsks.length - 1]?.price || 0
     const priceRange = maxPrice - minPrice
+
+    if (priceRange <= 0 || maxVolume <= 0) return
 
     const chartWidth = width - padding * 2
     const chartHeight = height - padding * 2
@@ -199,11 +298,39 @@ export default function App() {
 
   }, [bids, asks, midPrice])
 
+  const coinSymbol = selectedSymbol.split('/')[0]
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
-        <h1 style={styles.title}>HAVDEPTH</h1>
-        <div style={styles.symbol}>BTC/USD</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <h1 style={styles.title}>HAVDEPTH</h1>
+          <span style={{
+            fontSize: '10px',
+            padding: '2px 6px',
+            background: sdkReady ? '#00D9FF' : '#666',
+            color: '#0a0e14',
+            borderRadius: '4px',
+            fontWeight: 'bold'
+          }}>
+            SDK
+          </span>
+        </div>
+        <div style={styles.symbolSelector}>
+          {SYMBOLS.map(sym => (
+            <button
+              key={sym}
+              style={{
+                ...styles.symbolBtn,
+                background: selectedSymbol === sym ? '#00D9FF' : 'transparent',
+                color: selectedSymbol === sym ? '#0a0e14' : '#b3b1ad',
+              }}
+              onClick={() => handleSymbolChange(sym)}
+            >
+              {sym.split('/')[0]}
+            </button>
+          ))}
+        </div>
         <div style={styles.statusBar}>
           <span style={{
             ...styles.statusDot,
@@ -223,25 +350,25 @@ export default function App() {
         <div style={styles.statCard}>
           <div style={styles.statLabel}>SPREAD</div>
           <div style={{ ...styles.statValue, color: '#00D9FF' }}>
-            ${spread?.toFixed(2) || '---'}
+            ${spread?.toFixed(4) || '---'}
           </div>
         </div>
         <div style={styles.statCard}>
           <div style={styles.statLabel}>BID DEPTH</div>
           <div style={{ ...styles.statValue, color: '#00FF88' }}>
-            {bids.reduce((s, [_, q]) => s + q, 0).toFixed(4)} BTC
+            {bids.reduce((s, b) => s + getQty(b), 0).toFixed(4)} {coinSymbol}
           </div>
         </div>
         <div style={styles.statCard}>
           <div style={styles.statLabel}>ASK DEPTH</div>
           <div style={{ ...styles.statValue, color: '#FF4444' }}>
-            {asks.reduce((s, [_, q]) => s + q, 0).toFixed(4)} BTC
+            {asks.reduce((s, a) => s + getQty(a), 0).toFixed(4)} {coinSymbol}
           </div>
         </div>
       </div>
 
       <div style={styles.chartContainer}>
-        <h2 style={styles.sectionTitle}>CUMULATIVE DEPTH</h2>
+        <h2 style={styles.sectionTitle}>CUMULATIVE DEPTH — <span style={{ color: '#FFD700' }}>{selectedSymbol}</span></h2>
         <div style={styles.legend}>
           <span style={{ color: '#00FF88' }}>● Bids (Buy Orders)</span>
           <span style={{ color: '#FF4444' }}>● Asks (Sell Orders)</span>
@@ -265,7 +392,9 @@ export default function App() {
           </div>
           {(() => {
             let cum = 0
-            return bids.slice(0, 10).map(([price, qty], i) => {
+            return bids.slice(0, 10).map((bid, i) => {
+              const price = getPrice(bid)
+              const qty = getQty(bid)
               cum += qty
               return (
                 <div key={i} style={styles.tableRow}>
@@ -287,7 +416,9 @@ export default function App() {
           </div>
           {(() => {
             let cum = 0
-            return asks.slice(0, 10).map(([price, qty], i) => {
+            return asks.slice(0, 10).map((ask, i) => {
+              const price = getPrice(ask)
+              const qty = getQty(ask)
               cum += qty
               return (
                 <div key={i} style={styles.tableRow}>
@@ -300,6 +431,10 @@ export default function App() {
           })()}
         </div>
       </div>
+
+      <footer style={styles.footer}>
+        Powered by <span style={{ color: '#00D9FF' }}>Havklo SDK</span> | Real-time data from Kraken WebSocket v2
+      </footer>
     </div>
   )
 }
@@ -325,11 +460,21 @@ const styles = {
     fontSize: '24px',
     fontWeight: 'bold',
     letterSpacing: '4px',
+    margin: 0,
   },
-  symbol: {
-    color: '#FFD700',
-    fontSize: '18px',
+  symbolSelector: {
+    display: 'flex',
+    gap: '8px',
+  },
+  symbolBtn: {
+    padding: '6px 12px',
+    border: '1px solid #2a2e38',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '12px',
     fontWeight: 'bold',
+    fontFamily: "'SF Mono', monospace",
+    transition: 'all 0.2s',
   },
   statusBar: {
     display: 'flex',
@@ -377,6 +522,7 @@ const styles = {
     fontSize: '12px',
     letterSpacing: '2px',
     marginBottom: '10px',
+    marginTop: 0,
   },
   legend: {
     display: 'flex',
@@ -393,6 +539,7 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
     gap: '20px',
+    marginBottom: '25px',
   },
   levelTable: {
     background: '#12171f',
@@ -404,6 +551,7 @@ const styles = {
     fontSize: '12px',
     letterSpacing: '2px',
     marginBottom: '15px',
+    marginTop: 0,
   },
   tableHeader: {
     display: 'grid',
@@ -420,5 +568,12 @@ const styles = {
     padding: '6px 0',
     borderBottom: '1px solid #1a1f29',
     fontSize: '12px',
+  },
+  footer: {
+    textAlign: 'center',
+    color: '#666',
+    fontSize: '12px',
+    paddingTop: '15px',
+    borderTop: '1px solid #2a2e38',
   },
 }
