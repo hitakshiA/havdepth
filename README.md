@@ -2,6 +2,8 @@
 
 A real-time cumulative depth chart visualizer powered by the [Havklo SDK](https://github.com/hitakshiA/Havklo_sdk). See market liquidity at a glance with mountain-style depth visualization.
 
+**[Live Demo](https://havdepth.vercel.app)**
+
 ## What This Demonstrates
 
 I built Havdepth to showcase the **Havklo SDK's** ability to maintain deep orderbook state for visualization. The app tracks 50 price levels and renders a cumulative depth chart showing buy/sell walls.
@@ -23,6 +25,8 @@ I built Havdepth to showcase the **Havklo SDK's** ability to maintain deep order
 - Dark theme optimized for trading
 
 ## Quick Start
+
+Try the live demo at **https://havdepth.vercel.app** or run locally:
 
 ```bash
 # Clone the repository
