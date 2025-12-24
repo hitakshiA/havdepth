@@ -2,7 +2,7 @@
 
 A real-time cumulative depth chart visualizer powered by the [Havklo SDK](https://github.com/hitakshiA/Havklo_sdk). See market liquidity at a glance with mountain-style depth visualization.
 
-**[Live Demo](https://havdepth.vercel.app)**
+**[Live Demo]**= https://havdepth.vercel.app
 
 ## What This Demonstrates
 
